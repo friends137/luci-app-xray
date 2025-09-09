@@ -34,7 +34,7 @@ jobs:
 
       - name: Prepare Cache Key
         id: cache_key
-        run: echo "::set-output name=timestamp::$(date +"%s")"
+        run: echo "::set-output name=timestamp::$(date +'%s')"
 
       - name: Setup Cache
         uses: actions/cache@v4
@@ -90,7 +90,14 @@ jobs:
           cd "$SDK_HOME/package"
           mkdir -p $PACKAGE_NAME
           rsync -av --exclude 'openwrt-sdk' $GITHUB_WORKSPACE/ $PACKAGE_NAME/
-          ls -R "$PACKAGE_NAME"
+          # 提升 luci/ 下的文件到 package 根目录
+          cd $PACKAGE_NAME
+          if [ -d luci ]; then
+            rsync -av --remove-source-files luci/ .
+            rm -rf luci
+          fi
+          cd -
+          ls -R "$SDK_HOME/package/$PACKAGE_NAME"
 
       - name: Update and Install Feeds
         run: |
