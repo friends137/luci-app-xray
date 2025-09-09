@@ -1,3 +1,15 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "*"  # 当推送任意 tag 时触发（如 v1.0.0）
+  workflow_dispatch:  # 允许手动触发工作流
+
+env:
+  PACKAGE_NAME: luci-app-xray  # 目标包名
+  CACHE_DIR: ~/cache  # 缓存目录
+
 jobs:
   release:
     name: Build for ${{ matrix.arch }}
@@ -6,23 +18,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
+          - arch: x86_64  # 架构
             sdk_url_path: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64
             sdk_name: -sdk-23.05.5-x86-64_
 
     env:
       SDK_URL_PATH: ${{ matrix.sdk_url_path }}
-      SDK_NAME: ${{ matrix.sdk_name }}
+      SDK_NAME: ${{ matrix.sdk_url_path }}
       CCACHE_DIR: ~/.ccache
       CONFIG_CCACHE: y
     steps:
+      # 1. 检出代码
       - name: Checkout
         uses: actions/checkout@v3
 
+      # 2. 生成缓存键
       - name: Prepare Cache Key
         id: cache_key
         run: echo "::set-output name=timestamp::$(date +"%s")"
 
+      # 3. 设置缓存（SDK、依赖、编译缓存）
       - name: Setup Cache
         uses: actions/cache@v4
         with:
@@ -35,12 +50,14 @@ jobs:
           restore-keys: |
             openwrt-${{ matrix.arch }}-${{ env.PACKAGE_NAME }}-
 
+      # 4. 安装依赖并创建目录
       - name: Install Dependencies & Create Directories
         run: |
           (sudo apt-get install -y ccache gettext libncurses5-dev xsltproc p7zip-full) &
           (mkdir -p $CACHE_DIR_SDK $CACHE_DIR_DL $CACHE_DIR_FEEDS) &
           wait
 
+      # 5. 下载并解压 SDK
       - name: Download and Unzip SDK
         run: |
           cd "$CACHE_DIR_SDK"
@@ -71,6 +88,7 @@ jobs:
           sed -i 's#git.openwrt.org/feed/telephony#github.com/openwrt/telephony#' feeds.conf
           cd -
 
+      # 6. 更新并安装依赖包
       - name: Update and Install Packages
         run: |
           cd "$SDK_HOME"
@@ -79,6 +97,7 @@ jobs:
           ./scripts/feeds install $PACKAGE_NAME  # 仅安装目标包
           cd -
 
+      # 7. 编译目标包（仅增量编译）
       - name: Build Packages
         run: |
           cd "$SDK_HOME"
@@ -87,6 +106,7 @@ jobs:
           find "$SDK_HOME/bin/" -type f -name "*.ipk" -exec ls -lh {} \;
           cd -
 
+      # 8. 验证编译输出
       - name: Verify Build Output
         run: |
           find "${{ github.workspace }}" -type f -name "*.ipk" -exec ls -lh {} \;
@@ -95,10 +115,31 @@ jobs:
             exit 1
           fi
 
+      # 9. 上传编译产物到 GitHub Release
       - name: Release and Upload Assets
         uses: softprops/action-gh-release@v1
         with:
-          files: "*.ipk"
+          files: "*.ipk"  # 上传所有 .ipk 文件
           draft: true  # 强制创建草稿 release（无需 tag）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify:
+    name: Notify Release Publish
+    runs-on: ubuntu-latest
+    env:
+      TRIGGER_URL: ${{ secrets.TRIGGER_URL }}
+      TRIGGER_TOKEN: ${{ secrets.TRIGGER_TOKEN }}
+    needs: release
+    steps:
+      - name: Notify Jenkins
+        run: |
+          if [ -z "$TRIGGER_URL" ] ; then
+            echo "::warning::No trigger url found, skip..."
+            exit 0
+          fi
+          curl -X POST \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -H "Authorization: Bearer $TRIGGER_TOKEN" \
+              -d "{\"event\":\"release\",\"repository\":\"${{ github.repository }}\",\"ref\":\"${{ github.ref }}\"}" \
+              "$TRIGGER_URL" || true
