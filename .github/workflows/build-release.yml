@@ -73,24 +73,24 @@ jobs:
           fi
           sha256sum -c sha256sums.small
           cd -
-          7z x "$CACHE_DIR_SDK/$SDK_FILE" -so | tar -C "$SDK_HOME" -xvf - --strip=1
+          7z x "$CACHE_DIR_SDK/$SDK_FILE" -so | tar -C "$SDK_HOME" -xvf - --strip-components=1
+
+      - name: Prepare feeds and dl
+        run: |
           cd "$SDK_HOME"
-          rm -rf dl feeds
-          ln -s "$CACHE_DIR_DL" dl
-          ln -s "$CACHE_DIR_FEEDS" feeds
+          mkdir -p dl feeds
           cp feeds.conf.default feeds.conf
           sed -i 's#git.openwrt.org/openwrt/openwrt#github.com/openwrt/openwrt#' feeds.conf
           sed -i 's#git.openwrt.org/feed/packages#github.com/openwrt/packages#' feeds.conf
           sed -i 's#git.openwrt.org/project/luci#github.com/openwrt/luci#' feeds.conf
           sed -i 's#git.openwrt.org/feed/telephony#github.com/openwrt/telephony#' feeds.conf
-          cd -
 
       - name: Prepare luci-app-xray package
         run: |
           cd "$SDK_HOME/package"
-          # 复制源码到 SDK/package 下，确保 Makefile 在正确位置
-          rsync -av --exclude 'openwrt-sdk' $GITHUB_WORKSPACE/ $SDK_HOME/package/$PACKAGE_NAME/
-          ls -R "$SDK_HOME/package/$PACKAGE_NAME"
+          mkdir -p $PACKAGE_NAME
+          rsync -av --exclude 'openwrt-sdk' $GITHUB_WORKSPACE/ $PACKAGE_NAME/
+          ls -R "$PACKAGE_NAME"
 
       - name: Update and Install Feeds
         run: |
