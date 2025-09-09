@@ -25,14 +25,19 @@ jobs:
           mkdir -p "$SDK_HOME"
           wget -qO- "$SDK_URL" | tar -xJ --strip-components=1 -C "$SDK_HOME"
 
+      - name: Prepare luci-app-xray package
+        run: |
+          cd "$SDK_HOME/package"
+          # 把源码放到 package/luci-app-xray
+          mkdir -p luci-app-xray
+          cp -r $GITHUB_WORKSPACE/* luci-app-xray/
+          ls -R luci-app-xray
+
       - name: Update and Install Feeds
         run: |
           cd "$SDK_HOME"
           ./scripts/feeds update -a
-          # 把仓库放进 package/，注意不能多一层目录
-          ln -s "${{ github.workspace }}" package/
           ./scripts/feeds install -a
-          ls -R package/luci-app-xray
 
       - name: Build luci-app-xray
         run: |
