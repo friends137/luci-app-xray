@@ -1,192 +1,76 @@
-name: Build and Release
+- name: Download and Unzip SDK
+  run: |
+    cd "$CACHE_DIR_SDK"
+    echo "::warning::Forcing re-download of SDK to bypass cache..."
 
-on:
-  push:
-    tags:
-      - "*"  # 当推送任意 tag 时触发
-  workflow_dispatch:  # 允许手动触发
+    # 下载 sha256sums 文件
+    wget -q -O sha256sums "$SDK_URL_PATH/sha256sums"
+    if [ $? -ne 0 ]; then
+      echo "::error::Failed to download sha256sums file from $SDK_URL_PATH."
+      exit 1
+    fi
 
-env:
-  PACKAGE_NAME: luci-app-xray
-  CACHE_DIR: ~/cache
-  SDK_HOME: ~/openwrt-sdk
+    # 提取 SDK 文件名
+    SDK_FILE="$(grep "$SDK_NAME" sha256sums | cut -d' ' -f2 | sed 's/*//g')"
+    if [ -z "$SDK_FILE" ]; then
+      echo "::error::SDK file not found in sha256sums."
+      exit 1
+    fi
 
-jobs:
-  release:
-    name: Build for ${{ matrix.arch }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            sdk_url_path: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64
-            sdk_name: openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz  # 确保文件名正确
+    # 删除旧文件（强制重新下载）
+    if [ -f "$SDK_FILE" ]; then
+      rm -f "$SDK_FILE"
+    fi
 
-    env:
-      SDK_URL_PATH: ${{ matrix.sdk_url_path }}
-      SDK_NAME: ${{ matrix.sdk_name }}
-      CCACHE_DIR: ~/.ccache
-      CONFIG_CCACHE: y
-    steps:
-      # 1. 检出代码
-      - name: Checkout
-        uses: actions/checkout@v3
+    # 下载 SDK 文件（带重试）
+    MAX_RETRIES=3
+    RETRY_COUNT=0
+    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+      wget -q -O "$SDK_FILE" "$SDK_URL_PATH/$SDK_FILE"
+      if [ $? -eq 0 ]; then
+        break
+      else
+        echo "::warning::Download failed. Retrying ($((RETRY_COUNT + 1))/$MAX_RETRIES)..."
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        sleep 5
+      fi
+    done
 
-      # 2. 生成缓存键（使用 GITHUB_OUTPUT 替代 set-output）
-      - name: Prepare Cache Key
-        id: cache_key
-        run: |
-          echo "timestamp=$(date +"%s")" >> $GITHUB_OUTPUT
+    if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+      echo "::error::Failed to download SDK file after $MAX_RETRIES attempts."
+      exit 1
+    fi
 
-      # 3. 设置缓存
-      - name: Setup Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.CACHE_DIR }}
-            ${{ env.CCACHE_DIR }}
-            ${{ env.CACHE_DIR_SDK }}
-            ${{ env.CACHE_DIR_FEEDS }}
-          key: openwrt-${{ matrix.arch }}-${{ env.PACKAGE_NAME }}-${{ steps.cache_key.outputs.timestamp }}
-          restore-keys: |
-            openwrt-${{ matrix.arch }}-${{ env.PACKAGE_NAME }}-
+    # 验证文件存在性和大小
+    if [ ! -f "$SDK_FILE" ]; then
+      echo "::error::SDK file $SDK_FILE does not exist."
+      exit 1
+    fi
+    SDK_SIZE=$(stat -c "%s" "$SDK_FILE")
+    if [ "$SDK_SIZE" -lt 1000000 ]; then  # 假设 SDK 文件至少 1MB
+      echo "::error::SDK file size is too small (only $SDK_SIZE bytes). Likely corrupted."
+      exit 1
+    fi
 
-      # 4. 安装依赖并创建目录
-      - name: Install Dependencies & Create Directories
-        run: |
-          sudo apt-get update
-          (sudo apt-get install -y ccache gettext libncurses5-dev xsltproc p7zip-full) &
-          (mkdir -p $CACHE_DIR_SDK $CACHE_DIR_DL $CACHE_DIR_FEEDS) &
-          wait
+    # 手动验证校验和（调试输出）
+    EXPECTED_CHECKSUM=$(grep "$SDK_FILE" sha256sums | awk '{print $1}')
+    ACTUAL_CHECKSUM=$(sha256sum "$SDK_FILE" | awk '{print $1}')
+    if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
+      echo "::error::SDK file checksum mismatch!"
+      echo "Expected: $EXPECTED_CHECKSUM"
+      echo "Actual:   $ACTUAL_CHECKSUM"
+      exit 1
+    fi
 
-      # 5. 下载并解压 SDK（添加详细错误检查）
-      - name: Download and Unzip SDK
-        run: |
-          cd "$CACHE_DIR_SDK"
-          echo "::warning::Forcing re-download of SDK to bypass cache..."
+    # 创建目标目录
+    mkdir -p "$SDK_HOME"
 
-          # 下载 sha256sums 文件
-          wget -q -O sha256sums "$SDK_URL_PATH/sha256sums"
-          if [ $? -ne 0 ]; then
-            echo "::error::Failed to download sha256sums file from $SDK_URL_PATH."
-            exit 1
-          fi
+    # 解压 SDK（直接使用 tar 处理 .tar.xz）
+    echo "Extracting $SDK_FILE..."
+    tar -xJvf "$SDK_FILE" -C "$SDK_HOME" --strip=1
+    if [ $? -ne 0 ]; then
+      echo "::error::Failed to extract SDK file $SDK_FILE."
+      exit 1
+    fi
 
-          # 提取 SDK 文件名
-          SDK_FILE="$(grep "$SDK_NAME" sha256sums | cut -d' ' -f2 | sed 's/*//g')"
-          if [ -z "$SDK_FILE" ]; then
-            echo "::error::SDK file not found in sha256sums."
-            exit 1
-          fi
-
-          # 删除旧文件（强制重新下载）
-          if [ -f "$SDK_FILE" ]; then
-            rm -f "$SDK_FILE"
-          fi
-
-          # 下载 SDK 文件（带重试）
-          MAX_RETRIES=3
-          RETRY_COUNT=0
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            wget -q -O "$SDK_FILE" "$SDK_URL_PATH/$SDK_FILE"
-            if [ $? -eq 0 ]; then
-              break
-            else
-              echo "::warning::Download failed. Retrying ($((RETRY_COUNT + 1))/$MAX_RETRIES)..."
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              sleep 5
-            fi
-          done
-
-          if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
-            echo "::error::Failed to download SDK file after $MAX_RETRIES attempts."
-            exit 1
-          fi
-
-          # 验证文件存在性和大小
-          if [ ! -f "$SDK_FILE" ]; then
-            echo "::error::SDK file $SDK_FILE does not exist."
-            exit 1
-          fi
-          SDK_SIZE=$(stat -c "%s" "$SDK_FILE")
-          if [ "$SDK_SIZE" -lt 1000000 ]; then  # 假设 SDK 文件至少 1MB
-            echo "::error::SDK file size is too small (only $SDK_SIZE bytes). Likely corrupted."
-            exit 1
-          fi
-
-          # 手动验证校验和（调试输出）
-          EXPECTED_CHECKSUM=$(grep "$SDK_FILE" sha256sums | awk '{print $1}')
-          ACTUAL_CHECKSUM=$(sha256sum "$SDK_FILE" | awk '{print $1}')
-          if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
-            echo "::error::SDK file checksum mismatch!"
-            echo "Expected: $EXPECTED_CHECKSUM"
-            echo "Actual:   $ACTUAL_CHECKSUM"
-            exit 1
-          fi
-
-          # 解压 SDK
-          echo "Extracting $SDK_FILE..."
-          7z x "$SDK_FILE" -so | tar -C "$SDK_HOME" -xvf - --strip=1
-          if [ $? -ne 0 ]; then
-            echo "::error::Failed to extract SDK file $SDK_FILE."
-            exit 1
-          fi
-
-          cd -
-
-      # 6. 更新并安装依赖包
-      - name: Update and Install Packages
-        run: |
-          cd "$SDK_HOME"
-          ./scripts/feeds update -a
-          ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
-          ./scripts/feeds install $PACKAGE_NAME  # 仅安装目标包
-          cd -
-
-      # 7. 编译目标包（仅增量编译）
-      - name: Build Packages
-        run: |
-          cd "$SDK_HOME"
-          make defconfig
-          make package/${PACKAGE_NAME}/{clean,compile} V=s
-          find "$SDK_HOME/bin/" -type f -name "*.ipk" -exec ls -lh {} \;
-          cd -
-
-      # 8. 验证编译输出
-      - name: Verify Build Output
-        run: |
-          find "${{ github.workspace }}" -type f -name "*.ipk" -exec ls -lh {} \;
-          if [ $? -ne 0 ]; then
-            echo "::error::No IPK files found. Build failed!"
-            exit 1
-          fi
-
-      # 9. 上传编译产物到 GitHub Release
-      - name: Release and Upload Assets
-        uses: softprops/action-gh-release@v1
-        with:
-          files: "*.ipk"  # 上传所有 .ipk 文件
-          draft: true  # 强制创建草稿 release（无需 tag）
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  notify:
-    name: Notify Release Publish
-    runs-on: ubuntu-latest
-    env:
-      TRIGGER_URL: ${{ secrets.TRIGGER_URL }}
-      TRIGGER_TOKEN: ${{ secrets.TRIGGER_TOKEN }}
-    needs: release
-    steps:
-      - name: Notify Jenkins
-        run: |
-          if [ -z "$TRIGGER_URL" ] ; then
-            echo "::warning::No trigger url found, skip..."
-            exit 0
-          fi
-          curl -X POST \
-              -H "Content-Type: application/json; charset=utf-8" \
-              -H "Authorization: Bearer $TRIGGER_TOKEN" \
-              -d "{\"event\":\"release\",\"repository\":\"${{ github.repository }}\",\"ref\":\"${{ github.ref }}\"}" \
-              "$TRIGGER_URL" || true
+    cd -
