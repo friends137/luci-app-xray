@@ -8,183 +8,73 @@ on:
 
 env:
   PACKAGE_NAME: luci-app-xray
-  CACHE_DIR: ~/cache
   SDK_HOME: ~/openwrt-sdk
 
 jobs:
   release:
-    name: Build for ${{ matrix.arch }}
+    name: Build for x86_64
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            sdk_url_path: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64
-            sdk_name: openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz
-
-    env:
-      SDK_URL_PATH: ${{ matrix.sdk_url_path }}
-      SDK_NAME: ${{ matrix.sdk_name }}
-      CCACHE_DIR: ~/.ccache
-      CONFIG_CCACHE: y
 
     steps:
       # 1. 检出代码
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 2. 生成缓存键
-      - name: Prepare Cache Key
-        id: cache_key
+      # 2. 安装依赖（修复 libwget-dev 问题）
+      - name: Install Dependencies
         run: |
-          echo "timestamp=$(date +"%s")" >> $GITHUB_OUTPUT
+          # 替换为 Ubuntu 官方源
+          sudo sed -i 's/http:\/\/azure.archive.ubuntu.com/http:\/\/archive.ubuntu.com/g' /etc/apt/sources.list
+          sudo apt-get update -y || (echo "APT update failed"; exit 1)
 
-      # 3. 设置缓存
-      - name: Setup Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.CACHE_DIR }}
-            ${{ env.CCACHE_DIR }}
-            ${{ env.CACHE_DIR_SDK }}
-            ${{ env.CACHE_DIR_FEEDS }}
-          key: openwrt-${{ matrix.arch }}-${{ env.PACKAGE_NAME }}-${{ steps.cache_key.outputs.timestamp }}
-          restore-keys: |
-            openwrt-${{ matrix.arch }}-${{ env.PACKAGE_NAME }}-
+          # 安装依赖（注意：libwget-dev 改为 libwget2-dev）
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            libncurses5-dev \
+            flex \
+            bison \
+            libglib2.0-dev \
+            libwget2-dev  # 替代 libwget-dev
 
-      # 4. 安装依赖并创建目录
-      - name: Install Dependencies & Create Directories
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev libncurses5-dev flex bison libglib2.0-dev wget libwget-dev  # 安装缺失的依赖
-          (mkdir -p $CACHE_DIR_SDK $CACHE_DIR_DL $CACHE_DIR_FEEDS) &
-          wait
-
-      # 5. 下载并解压 SDK
+      # 3. 下载并解压 OpenWRT SDK（示例）
       - name: Download and Unzip SDK
         run: |
-          cd "$CACHE_DIR_SDK"
-          echo "::warning::Forcing re-download of SDK to bypass cache..."
-
-          # 下载 sha256sums 文件
-          wget -q -O sha256sums "$SDK_URL_PATH/sha256sums"
-          if [ $? -ne 0 ]; then
-            echo "::error::Failed to download sha256sums file from $SDK_URL_PATH."
-            exit 1
-          fi
-
-          # 提取 SDK 文件名
-          SDK_FILE="$(grep "$SDK_NAME" sha256sums | cut -d' ' -f2 | sed 's/*//g')"
-          if [ -z "$SDK_FILE" ]; then
-            echo "::error::SDK file not found in sha256sums."
-            exit 1
-          fi
-
-          # 删除旧文件（强制重新下载）
-          if [ -f "$SDK_FILE" ]; then
-            rm -f "$SDK_FILE"
-          fi
-
-          # 下载 SDK 文件（带重试）
-          MAX_RETRIES=3
-          RETRY_COUNT=0
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            wget -q -O "$SDK_FILE" "$SDK_URL_PATH/$SDK_FILE"
-            if [ $? -eq 0 ]; then
-              break
-            else
-              echo "::warning::Download failed. Retrying ($((RETRY_COUNT + 1))/$MAX_RETRIES)..."
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              sleep 5
-            fi
-          done
-
-          if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
-            echo "::error::Failed to download SDK file after $MAX_RETRIES attempts."
-            exit 1
-          fi
-
-          # 验证文件存在性和大小
-          if [ ! -f "$SDK_FILE" ]; then
-            echo "::error::SDK file $SDK_FILE does not exist."
-            exit 1
-          fi
-          SDK_SIZE=$(stat -c "%s" "$SDK_FILE")
-          if [ "$SDK_SIZE" -lt 1000000 ]; then  # 假设 SDK 文件至少 1MB
-            echo "::error::SDK file size is too small (only $SDK_SIZE bytes). Likely corrupted."
-            exit 1
-          fi
-
-          # 手动验证校验和（调试输出）
-          EXPECTED_CHECKSUM=$(grep "$SDK_FILE" sha256sums | awk '{print $1}')
-          ACTUAL_CHECKSUM=$(sha256sum "$SDK_FILE" | awk '{print $1}')
-          if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
-            echo "::error::SDK file checksum mismatch!"
-            echo "Expected: $EXPECTED_CHECKSUM"
-            echo "Actual:   $ACTUAL_CHECKSUM"
-            exit 1
-          fi
-
-          # 创建目标目录
+          SDK_URL="https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+          SDK_NAME=$(basename "$SDK_URL")
           mkdir -p "$SDK_HOME"
-
-          # 解压 SDK
-          echo "Extracting $SDK_FILE..."
-          tar -xJvf "$SDK_FILE" -C "$SDK_HOME" --strip=1
-          if [ $? -ne 0 ]; then
-            echo "::error::Failed to extract SDK file $SDK_FILE."
-            exit 1
-          fi
-
+          cd "$SDK_HOME"
+          wget -O "$SDK_NAME" "$SDK_URL" || (echo "Failed to download SDK"; exit 1)
+          tar -xJf "$SDK_NAME" --strip-components=1 || (echo "Failed to extract SDK"; exit 1)
           cd -
 
-      # 6. 更新并安装依赖包
-      - name: Update and Install Packages
+      # 4. 更新 feeds 并安装依赖
+      - name: Update Feeds and Install Packages
         run: |
           cd "$SDK_HOME"
-          ./scripts/feeds update -a  # 更新所有 feeds
-          ./scripts/feeds install -a  # 安装所有依赖
-          ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"  # 链接本地包
-          make defconfig  # 生成默认配置
-          make package/${PACKAGE_NAME}/{clean,compile} V=s  # 清理并编译
-          find "$SDK_HOME/bin/" -type f -name "*.ipk" -exec ls -lh {} \;
-          cd -
+          ./scripts/feeds update -a || (echo "Feeds update failed"; exit 1)
+          ./scripts/feeds install -a || (echo "Feeds install failed"; exit 1)
+          ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME" || (echo "Link package failed"; exit 1)
 
-      # 7. 验证编译输出
-      - name: Verify Build Output
+      # 5. 编译包
+      - name: Compile Package
         run: |
-          find "${{ github.workspace }}" -type f -name "*.ipk" -exec ls -lh {} \;
-          if [ $? -ne 0 ]; then
-            echo "::error::No IPK files found. Build failed!"
-            exit 1
-          fi
+          cd "$SDK_HOME"
+          make defconfig || (echo "Defconfig failed"; exit 1)
+          make package/${PACKAGE_NAME}/{clean,compile} V=s || (echo "Compilation failed"; exit 1)
 
-      # 8. 上传编译产物到 GitHub Release
-      - name: Release and Upload Assets
+      # 6. 上传 IPK 文件
+      - name: Upload IPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipk-output
+          path: "$SDK_HOME/bin/packages/x86_64/"
+
+      # 7. 发布到 GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: "*.ipk"
+          files: "**/*.ipk"
           draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  notify:
-    name: Notify Release Publish
-    runs-on: ubuntu-latest
-    env:
-      TRIGGER_URL: ${{ secrets.TRIGGER_URL }}
-      TRIGGER_TOKEN: ${{ secrets.TRIGGER_TOKEN }}
-    needs: release
-    steps:
-      - name: Notify Jenkins
-        run: |
-          if [ -z "$TRIGGER_URL" ] ; then
-            echo "::warning::No trigger url found, skip..."
-            exit 0
-          fi
-          curl -X POST \
-              -H "Content-Type: application/json; charset=utf-8" \
-              -H "Authorization: Bearer $TRIGGER_TOKEN" \
-              -d "{\"event\":\"release\",\"repository\":\"${{ github.repository }}\",\"ref\":\"${{ github.ref }}\"}" \
-              "$TRIGGER_URL" || true
