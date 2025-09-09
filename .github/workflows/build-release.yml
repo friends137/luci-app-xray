@@ -1,10 +1,6 @@
 name: Build luci-app-xray
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
@@ -29,9 +25,9 @@ jobs:
         run: |
           cd "$SDK_HOME/package"
           mkdir -p luci-app-xray
-          # 只复制源码，不要复制 openwrt-sdk 目录
           rsync -av --exclude 'openwrt-sdk' $GITHUB_WORKSPACE/ luci-app-xray/
-          ls -R luci-app-xray
+          echo "==== package/luci-app-xray structure ===="
+          tree luci-app-xray || ls -R luci-app-xray
 
       - name: Update and Install Feeds
         run: |
@@ -43,7 +39,9 @@ jobs:
         run: |
           cd "$SDK_HOME"
           make defconfig
-          make package/luci-app-xray/compile V=s -j$(nproc)
+          echo "==== Try compiling directly ===="
+          make package/luci-app-xray/compile V=s -j$(nproc) || \
+          make package/feeds/luci/luci-app-xray/compile V=s -j$(nproc)
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
