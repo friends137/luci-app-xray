@@ -92,14 +92,15 @@ jobs:
         run: |
           cd "$SDK_HOME"
           ./scripts/feeds update -a
+          # 把当前仓库链接到 SDK 的 package 目录
           ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
           ./scripts/feeds install -a
+          ls -R "package/$PACKAGE_NAME"
 
       - name: Build Package
         run: |
           cd "$SDK_HOME"
           make defconfig
-          make package/${PACKAGE_NAME}/clean V=s
           make package/${PACKAGE_NAME}/compile V=s
           find "$SDK_HOME/bin/" -type f -name "*.ipk" -exec ls -lh {} \;
 
@@ -123,23 +124,3 @@ jobs:
           files: output/*.ipk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  notify:
-    name: Notify Release Publish
-    runs-on: ubuntu-latest
-    env:
-      TRIGGER_URL: ${{ secrets.TRIGGER_URL }}
-      TRIGGER_TOKEN: ${{ secrets.TRIGGER_TOKEN }}
-    needs: release
-    steps:
-      - name: Notify Jenkins
-        run: |
-          if [ -z "$TRIGGER_URL" ] ; then
-            echo "::warning::No trigger url found, skip..."
-            exit 0
-          fi
-          curl -X POST \
-              -H "Content-Type: application/json; charset=utf-8" \
-              -H "Authorization: Bearer $TRIGGER_TOKEN" \
-              -d "{\"event\":\"release\",\"repository\":\"${{ github.repository }}\",\"ref\":\"${{ github.ref }}\"}" \
-              "$TRIGGER_URL" || true
