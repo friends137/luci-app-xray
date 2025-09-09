@@ -20,14 +20,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 2. 安装依赖（修复 libwget-dev 问题）
-      - name: Install Dependencies
+      # 2. 替换为 Ubuntu 官方源（修复 Azure 镜像源问题）
+      - name: Replace Mirror to Official Ubuntu
         run: |
-          # 替换为 Ubuntu 官方源
           sudo sed -i 's/http:\/\/azure.archive.ubuntu.com/http:\/\/archive.ubuntu.com/g' /etc/apt/sources.list
           sudo apt-get update -y || (echo "APT update failed"; exit 1)
 
-          # 安装依赖（注意：libwget-dev 改为 libwget2-dev）
+      # 3. 安装依赖（使用正确包名 + 手动安装缺失包）
+      - name: Install Dependencies
+        run: |
           sudo apt-get install -y \
             build-essential \
             libssl-dev \
@@ -35,9 +36,13 @@ jobs:
             flex \
             bison \
             libglib2.0-dev \
-            libwget2-dev  # 替代 libwget-dev
+            libcurl4-openssl-dev  # 替代 libwget2-dev 的依赖
 
-      # 3. 下载并解压 OpenWRT SDK（示例）
+          # 手动安装 libwget2-dev（Ubuntu 24.04 无此包，需手动下载）
+          wget https://launchpad.net/ubuntu/+archive/primary/+files/libwget2-dev_1.21.2-2.1build1_amd64.deb
+          sudo dpkg -i libwget2-dev_1.21.2-2.1build1_amd64.deb || sudo apt --fix-broken install -y
+
+      # 4. 下载并解压 OpenWRT SDK
       - name: Download and Unzip SDK
         run: |
           SDK_URL="https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
@@ -48,7 +53,7 @@ jobs:
           tar -xJf "$SDK_NAME" --strip-components=1 || (echo "Failed to extract SDK"; exit 1)
           cd -
 
-      # 4. 更新 feeds 并安装依赖
+      # 5. 更新 feeds 并安装依赖
       - name: Update Feeds and Install Packages
         run: |
           cd "$SDK_HOME"
@@ -56,21 +61,21 @@ jobs:
           ./scripts/feeds install -a || (echo "Feeds install failed"; exit 1)
           ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME" || (echo "Link package failed"; exit 1)
 
-      # 5. 编译包
+      # 6. 编译包
       - name: Compile Package
         run: |
           cd "$SDK_HOME"
           make defconfig || (echo "Defconfig failed"; exit 1)
           make package/${PACKAGE_NAME}/{clean,compile} V=s || (echo "Compilation failed"; exit 1)
 
-      # 6. 上传 IPK 文件
+      # 7. 上传 IPK 文件
       - name: Upload IPK
         uses: actions/upload-artifact@v4
         with:
           name: ipk-output
           path: "$SDK_HOME/bin/packages/x86_64/"
 
-      # 7. 发布到 GitHub Release
+      # 8. 发布到 GitHub Release
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
