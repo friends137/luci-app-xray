@@ -57,7 +57,7 @@ jobs:
       - name: Install Dependencies & Create Directories
         run: |
           sudo apt-get update
-          (sudo apt-get install -y ccache gettext libncurses5-dev xsltproc p7zip-full) &
+          sudo apt-get install -y build-essential libssl-dev libncurses5-dev flex bison libglib2.0-dev wget libwget-dev  # 安装缺失的依赖
           (mkdir -p $CACHE_DIR_SDK $CACHE_DIR_DL $CACHE_DIR_FEEDS) &
           wait
 
@@ -143,21 +143,15 @@ jobs:
       - name: Update and Install Packages
         run: |
           cd "$SDK_HOME"
-          ./scripts/feeds update -a
-          ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
-          ./scripts/feeds install $PACKAGE_NAME
-          cd -
-
-      # 7. 编译目标包
-      - name: Build Packages
-        run: |
-          cd "$SDK_HOME"
-          make defconfig
-          make package/${PACKAGE_NAME}/{clean,compile} V=s
+          ./scripts/feeds update -a  # 更新所有 feeds
+          ./scripts/feeds install -a  # 安装所有依赖
+          ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"  # 链接本地包
+          make defconfig  # 生成默认配置
+          make package/${PACKAGE_NAME}/{clean,compile} V=s  # 清理并编译
           find "$SDK_HOME/bin/" -type f -name "*.ipk" -exec ls -lh {} \;
           cd -
 
-      # 8. 验证编译输出
+      # 7. 验证编译输出
       - name: Verify Build Output
         run: |
           find "${{ github.workspace }}" -type f -name "*.ipk" -exec ls -lh {} \;
@@ -166,7 +160,7 @@ jobs:
             exit 1
           fi
 
-      # 9. 上传编译产物到 GitHub Release
+      # 8. 上传编译产物到 GitHub Release
       - name: Release and Upload Assets
         uses: softprops/action-gh-release@v1
         with:
