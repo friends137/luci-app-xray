@@ -3,12 +3,12 @@ name: Build and Release
 on:
   push:
     tags:
-      - "*"  # 当推送任意 tag 时触发（如 v1.0.0）
-  workflow_dispatch:  # 允许手动触发工作流
+      - "*"  # 当推送任意 tag 时触发
+  workflow_dispatch:  # 允许手动触发
 
 env:
-  PACKAGE_NAME: luci-app-xray  # 目标包名
-  CACHE_DIR: ~/cache  # 缓存目录
+  PACKAGE_NAME: luci-app-xray
+  CACHE_DIR: ~/cache
 
 jobs:
   release:
@@ -18,13 +18,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64  # 架构
+          - arch: x86_64
             sdk_url_path: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64
-            sdk_name: -sdk-23.05.5-x86-64_
+            sdk_name: openwrt-sdk-23.05.5-x86-64_  # 修正后的 SDK 名称
 
     env:
       SDK_URL_PATH: ${{ matrix.sdk_url_path }}
-      SDK_NAME: ${{ matrix.sdk_url_path }}
+      SDK_NAME: ${{ matrix.sdk_name }}
       CCACHE_DIR: ~/.ccache
       CONFIG_CCACHE: y
     steps:
@@ -32,12 +32,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 2. 生成缓存键
+      # 2. 生成缓存键（使用 GITHUB_OUTPUT 替代 set-output）
       - name: Prepare Cache Key
         id: cache_key
-        run: echo "::set-output name=timestamp::$(date +"%s")"
+        run: |
+          echo "timestamp=$(date +"%s")" >> $GITHUB_OUTPUT
 
-      # 3. 设置缓存（SDK、依赖、编译缓存）
+      # 3. 设置缓存
       - name: Setup Cache
         uses: actions/cache@v4
         with:
