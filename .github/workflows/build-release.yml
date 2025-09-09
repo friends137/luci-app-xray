@@ -1,126 +1,48 @@
-name: Build and Release
+name: Build luci-app-xray
 
 on:
   push:
-    branches:
-      - main
-      - dev
-    tags:
-      - "*"
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
 
-env:
-  PACKAGE_NAME: luci-app-xray
-  CACHE_DIR: ~/cache
-
 jobs:
-  release:
-    name: Build for ${{ matrix.arch }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            sdk_url_path: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64
-            sdk_name: -sdk-23.05.5-x86-64_
-
-    env:
-      SDK_URL_PATH: ${{ matrix.sdk_url_path }}
-      SDK_NAME: ${{ matrix.sdk_name }}
-      CCACHE_DIR: ~/.ccache
-      CONFIG_CCACHE: y
+  build:
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Prepare Cache Key
-        id: cache_key
-        run: echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
-
-      - name: Setup Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.CACHE_DIR }}
-            ${{ env.CCACHE_DIR }}
-          key: openwrt-${{ matrix.arch }}-${{ env.PACKAGE_NAME }}-${{ steps.cache_key.outputs.timestamp }}
-          restore-keys: |
-            openwrt-${{ matrix.arch }}-${{ env.PACKAGE_NAME }}-
-
-      - name: Install Dependencies
+      - name: Set variables
         run: |
-          sudo apt-get update
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y \
-            ccache gettext libncurses5-dev xsltproc p7zip-full
+          echo "SDK_URL=https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz" >> $GITHUB_ENV
+          echo "SDK_HOME=$GITHUB_WORKSPACE/openwrt-sdk" >> $GITHUB_ENV
 
-      - name: Create Directories
+      - name: Download and Extract SDK
         run: |
-          CACHE_DIR_SDK="$(eval echo "$CACHE_DIR/sdk")"
-          CACHE_DIR_DL="$(eval echo "$CACHE_DIR/dl")"
-          CACHE_DIR_FEEDS="$(eval echo "$CACHE_DIR/feeds")"
-          mkdir -p "$CACHE_DIR_SDK" "$CACHE_DIR_DL" "$CACHE_DIR_FEEDS"
-          echo "CACHE_DIR_SDK=$CACHE_DIR_SDK" >> $GITHUB_ENV
-          echo "CACHE_DIR_DL=$CACHE_DIR_DL" >> $GITHUB_ENV
-          echo "CACHE_DIR_FEEDS=$CACHE_DIR_FEEDS" >> $GITHUB_ENV
-          echo "SDK_HOME=$(mktemp -d)" >> $GITHUB_ENV
-
-      - name: Download and Unzip SDK
-        run: |
-          cd "$CACHE_DIR_SDK"
-          wget -q -O sha256sums "$SDK_URL_PATH/sha256sums"
-          grep -- "$SDK_NAME" sha256sums > sha256sums.small
-          SDK_FILE="$(cut -d' ' -f2 sha256sums.small | sed 's/*//g')"
-          if ! sha256sum -c sha256sums.small >/dev/null 2>&1; then
-            wget -q -O "$SDK_FILE" "$SDK_URL_PATH/$SDK_FILE"
-            sha256sum -c sha256sums.small
-          fi
-          cd -
-          7z x "$CACHE_DIR_SDK/$SDK_FILE" -so | tar -C "$SDK_HOME" -xvf - --strip=1
-          cd "$SDK_HOME"
-          rm -rf dl feeds
-          ln -s "$CACHE_DIR_DL" dl
-          ln -s "$CACHE_DIR_FEEDS" feeds
-          cp feeds.conf.default feeds.conf
-          sed -i 's#git.openwrt.org/openwrt/openwrt#github.com/openwrt/openwrt#' feeds.conf
-          sed -i 's#git.openwrt.org/feed/packages#github.com/openwrt/packages#' feeds.conf
-          sed -i 's#git.openwrt.org/project/luci#github.com/openwrt/luci#' feeds.conf
-          sed -i 's#git.openwrt.org/feed/telephony#github.com/openwrt/telephony#' feeds.conf
+          mkdir -p "$SDK_HOME"
+          wget -qO- "$SDK_URL" | tar -xJ --strip-components=1 -C "$SDK_HOME"
 
       - name: Update and Install Feeds
         run: |
           cd "$SDK_HOME"
           ./scripts/feeds update -a
-          # 把当前仓库链接到 SDK 的 package 目录
-          ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
+          # 把仓库放进 package/，注意不能多一层目录
+          ln -s "${{ github.workspace }}" package/
           ./scripts/feeds install -a
-          ls -R "package/$PACKAGE_NAME"
+          ls -R package/luci-app-xray
 
-      - name: Build Package
+      - name: Build luci-app-xray
         run: |
           cd "$SDK_HOME"
           make defconfig
-          make package/${PACKAGE_NAME}/compile V=s
-          find "$SDK_HOME/bin/" -type f -name "*.ipk" -exec ls -lh {} \;
+          make package/luci-app-xray/compile V=s -j$(nproc)
 
-      - name: Copy Bin Files
-        run: |
-          mkdir -p "${{ github.workspace }}/output"
-          find "$SDK_HOME/bin/" -type f -name "${PACKAGE_NAME}*.ipk" -exec cp {} "${{ github.workspace }}/output/" \;
-          ls -lh "${{ github.workspace }}/output"
-
-      - name: Upload Artifacts (for non-tag builds)
-        if: startsWith(github.ref, 'refs/tags/') == false
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.arch }}-packages
-          path: output/*.ipk
-
-      - name: Release and Upload Assets
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: output/*.ipk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: luci-app-xray
+          path: |
+            ${{ env.SDK_HOME }}/bin/packages/*/*/luci-app-xray*.ipk
