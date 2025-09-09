@@ -2,87 +2,144 @@ name: Build and Release
 
 on:
   push:
+    branches:
+      - main
+      - dev
     tags:
-      - "*"  # 当推送任意 tag 时触发
-  workflow_dispatch:  # 允许手动触发
+      - "*"
+  workflow_dispatch:
 
 env:
   PACKAGE_NAME: luci-app-xray
-  SDK_HOME: ~/openwrt-sdk
+  CACHE_DIR: ~/cache
 
 jobs:
   release:
-    name: Build for x86_64
+    name: Build for ${{ matrix.arch }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            sdk_url_path: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64
+            sdk_name: -sdk-23.05.5-x86-64_
+
+    env:
+      SDK_URL_PATH: ${{ matrix.sdk_url_path }}
+      SDK_NAME: ${{ matrix.sdk_name }}
+      CCACHE_DIR: ~/.ccache
+      CONFIG_CCACHE: y
 
     steps:
-      # 1. 检出代码
       - name: Checkout
         uses: actions/checkout@v3
 
-      # 2. 替换为 Ubuntu 官方源（修复 Azure 镜像源问题）
-      - name: Replace Mirror to Official Ubuntu
-        run: |
-          sudo sed -i 's/http:\/\/azure.archive.ubuntu.com/http:\/\/archive.ubuntu.com/g' /etc/apt/sources.list
-          sudo apt-get update -y || (echo "APT update failed"; exit 1)
+      - name: Prepare Cache Key
+        id: cache_key
+        run: echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
 
-      # 3. 安装依赖（使用正确包名 + 替代方案）
+      - name: Setup Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CACHE_DIR }}
+            ${{ env.CCACHE_DIR }}
+          key: openwrt-${{ matrix.arch }}-${{ env.PACKAGE_NAME }}-${{ steps.cache_key.outputs.timestamp }}
+          restore-keys: |
+            openwrt-${{ matrix.arch }}-${{ env.PACKAGE_NAME }}-
+
       - name: Install Dependencies
         run: |
-          sudo apt-get install -y \
-            build-essential \
-            libssl-dev \
-            libncurses5-dev \
-            flex \
-            bison \
-            libglib2.0-dev \
-            libcurl4-openssl-dev  # 替代 libwget2-dev 的依赖
+          sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y \
+            ccache gettext libncurses5-dev xsltproc p7zip-full
 
-          # 手动安装 libwget-dev（如果存在）
-          if sudo apt-cache search libwget-dev | grep -q libwget-dev; then
-            sudo apt-get install -y libwget-dev || sudo apt --fix-broken install -y
-          else
-            echo "libwget-dev not found in repository."
-          fi
+      - name: Create Directories
+        run: |
+          CACHE_DIR_SDK="$(eval echo "$CACHE_DIR/sdk")"
+          CACHE_DIR_DL="$(eval echo "$CACHE_DIR/dl")"
+          CACHE_DIR_FEEDS="$(eval echo "$CACHE_DIR/feeds")"
+          mkdir -p "$CACHE_DIR_SDK" "$CACHE_DIR_DL" "$CACHE_DIR_FEEDS"
+          echo "CACHE_DIR_SDK=$CACHE_DIR_SDK" >> $GITHUB_ENV
+          echo "CACHE_DIR_DL=$CACHE_DIR_DL" >> $GITHUB_ENV
+          echo "CACHE_DIR_FEEDS=$CACHE_DIR_FEEDS" >> $GITHUB_ENV
+          echo "SDK_HOME=$(mktemp -d)" >> $GITHUB_ENV
 
-      # 4. 下载并解压 OpenWRT SDK
       - name: Download and Unzip SDK
         run: |
-          SDK_URL="https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
-          SDK_NAME=$(basename "$SDK_URL")
-          mkdir -p "$SDK_HOME"
-          cd "$SDK_HOME"
-          wget -O "$SDK_NAME" "$SDK_URL" || (echo "Failed to download SDK"; exit 1)
-          tar -xJf "$SDK_NAME" --strip-components=1 || (echo "Failed to extract SDK"; exit 1)
+          cd "$CACHE_DIR_SDK"
+          wget -q -O sha256sums "$SDK_URL_PATH/sha256sums"
+          grep -- "$SDK_NAME" sha256sums > sha256sums.small
+          SDK_FILE="$(cut -d' ' -f2 sha256sums.small | sed 's/*//g')"
+          if ! sha256sum -c sha256sums.small >/dev/null 2>&1; then
+            wget -q -O "$SDK_FILE" "$SDK_URL_PATH/$SDK_FILE"
+            sha256sum -c sha256sums.small
+          fi
           cd -
+          7z x "$CACHE_DIR_SDK/$SDK_FILE" -so | tar -C "$SDK_HOME" -xvf - --strip=1
+          cd "$SDK_HOME"
+          rm -rf dl feeds
+          ln -s "$CACHE_DIR_DL" dl
+          ln -s "$CACHE_DIR_FEEDS" feeds
+          cp feeds.conf.default feeds.conf
+          sed -i 's#git.openwrt.org/openwrt/openwrt#github.com/openwrt/openwrt#' feeds.conf
+          sed -i 's#git.openwrt.org/feed/packages#github.com/openwrt/packages#' feeds.conf
+          sed -i 's#git.openwrt.org/project/luci#github.com/openwrt/luci#' feeds.conf
+          sed -i 's#git.openwrt.org/feed/telephony#github.com/openwrt/telephony#' feeds.conf
 
-      # 5. 更新 feeds 并安装依赖
-      - name: Update Feeds and Install Packages
+      - name: Update and Install Feeds
         run: |
           cd "$SDK_HOME"
-          ./scripts/feeds update -a || (echo "Feeds update failed"; exit 1)
-          ./scripts/feeds install -a || (echo "Feeds install failed"; exit 1)
-          ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME" || (echo "Link package failed"; exit 1)
+          ./scripts/feeds update -a
+          ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
+          ./scripts/feeds install -a
 
-      # 6. 编译包
-      - name: Compile Package
+      - name: Build Package
         run: |
           cd "$SDK_HOME"
-          make defconfig || (echo "Defconfig failed"; exit 1)
-          make package/${PACKAGE_NAME}/{clean,compile} V=s || (echo "Compilation failed"; exit 1)
+          make defconfig
+          make package/${PACKAGE_NAME}/clean V=s
+          make package/${PACKAGE_NAME}/compile V=s
+          find "$SDK_HOME/bin/" -type f -name "*.ipk" -exec ls -lh {} \;
 
-      # 7. 上传 IPK 文件
-      - name: Upload IPK
+      - name: Copy Bin Files
+        run: |
+          mkdir -p "${{ github.workspace }}/output"
+          find "$SDK_HOME/bin/" -type f -name "${PACKAGE_NAME}*.ipk" -exec cp {} "${{ github.workspace }}/output/" \;
+          ls -lh "${{ github.workspace }}/output"
+
+      - name: Upload Artifacts (for non-tag builds)
+        if: startsWith(github.ref, 'refs/tags/') == false
         uses: actions/upload-artifact@v4
         with:
-          name: ipk-output
-          path: "$SDK_HOME/bin/packages/x86_64/"
+          name: ${{ matrix.arch }}-packages
+          path: output/*.ipk
 
-      # 8. 发布到 GitHub Release
-      - name: Create Release
+      - name: Release and Upload Assets
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: "**/*.ipk"
-          draft: true
+          files: output/*.ipk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify:
+    name: Notify Release Publish
+    runs-on: ubuntu-latest
+    env:
+      TRIGGER_URL: ${{ secrets.TRIGGER_URL }}
+      TRIGGER_TOKEN: ${{ secrets.TRIGGER_TOKEN }}
+    needs: release
+    steps:
+      - name: Notify Jenkins
+        run: |
+          if [ -z "$TRIGGER_URL" ] ; then
+            echo "::warning::No trigger url found, skip..."
+            exit 0
+          fi
+          curl -X POST \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -H "Authorization: Bearer $TRIGGER_TOKEN" \
+              -d "{\"event\":\"release\",\"repository\":\"${{ github.repository }}\",\"ref\":\"${{ github.ref }}\"}" \
+              "$TRIGGER_URL" || true
